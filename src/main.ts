@@ -254,6 +254,27 @@ ipcMain.handle("save-settings", (_event, newSettings: Settings) => {
   saveSettings(settings);
 });
 
+ipcMain.handle("start-hotkey-capture", () => {
+  // Unregister all shortcuts so keydown events flow through to the renderer unblocked.
+  // The renderer adds its own keydown listener after this returns.
+  globalShortcut.unregisterAll();
+  if (settingsWindow) settingsWindow.focus();
+  return { ready: true };
+});
+
+ipcMain.handle("confirm-hotkey", (_event, accelerator: string) => {
+  // Called by renderer once it has captured the key combo.
+  // Register it immediately so the user can test it, update in-memory settings.
+  // The full settings.json write happens when the user clicks Save.
+  registerHotkey(accelerator);
+  settings.hotkey = accelerator;
+  // Echo back to renderer so it can update the display
+  if (settingsWindow) {
+    settingsWindow.webContents.send("hotkey-captured", accelerator);
+  }
+  return { ok: true };
+});
+
 ipcMain.handle("get-audio-devices", async () => {
   // Returns a list of mic device names via Python helper
   return new Promise((resolve) => {

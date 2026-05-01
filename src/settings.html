@@ -274,28 +274,39 @@
 
     let captureListener = null;
 
-    hotkeyBtn.addEventListener("click", () => {
+    hotkeyBtn.addEventListener("click", async () => {
       if (captureListener) return;
 
       hotkeyBtn.classList.add("listening");
       hotkeyBtn.textContent = "Press your hotkey…";
+
+      // Ask main to unregister all shortcuts (so the keypress reaches us)
+      // and focus this window. Waits for main to confirm before listening.
+      await api.startHotkeyCapture();
 
       captureListener = (e) => {
         e.preventDefault();
         e.stopPropagation();
 
         const accelerator = eventToElectron(e);
-        if (!accelerator) return;
+        if (!accelerator) return;   // modifier-only, keep waiting
 
-        capturedAccelerator = accelerator;
         hotkeyBtn.classList.remove("listening");
-        updateHotkeyBtn();
-
+        hotkeyBtn.textContent = "Registering…";
         window.removeEventListener("keydown", captureListener, true);
         captureListener = null;
+
+        // Send to main: re-registers the shortcut, echoes hotkey-captured back
+        api.confirmHotkey(accelerator);
       };
 
       window.addEventListener("keydown", captureListener, true);
+    });
+
+    // Main confirmed the hotkey is registered — update display
+    api.onHotkeyCaptured((accelerator) => {
+      capturedAccelerator = accelerator;
+      updateHotkeyBtn();
     });
 
     testBtn.addEventListener("click", () => {

@@ -1,6 +1,6 @@
 {
   "name": "swift-type",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Hold a key. Speak. Done. Hands-free voice input for Windows.",
   "main": "dist/main.js",
   "author": "Spencer",
