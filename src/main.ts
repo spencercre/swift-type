@@ -2,12 +2,12 @@ import {
   app,
   BrowserWindow,
   clipboard,
-  globalShortcut,
   ipcMain,
   Menu,
   nativeImage,
   Tray,
 } from "electron";
+import { uIOhook, UiohookKey } from "uiohook-napi";
 import { spawn } from "child_process";
 import * as path from "path";
 import * as fs from "fs";
@@ -25,7 +25,6 @@ let recordingStartEpoch = 0;
 
 // Persisted settings (written to disk on save)
 interface Settings {
-  hotkey: string;
   microphone: string;
   model: "tiny" | "base" | "small";
 }
@@ -35,12 +34,13 @@ const SETTINGS_PATH = path.join(app.getPath("userData"), "settings.json");
 function loadSettings(): Settings {
   try {
     if (fs.existsSync(SETTINGS_PATH)) {
-      return JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf-8"));
+      const raw = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf-8"));
+      return { microphone: raw.microphone ?? "default", model: raw.model ?? "base" };
     }
   } catch {
     // fall through to defaults
   }
-  return { hotkey: "CommandOrControl+Shift+Space", microphone: "default", model: "base" };
+  return { microphone: "default", model: "base" };
 }
 
 function saveSettings(s: Settings): void {
@@ -104,7 +104,7 @@ function openSettings(): void {
 
   settingsWindow = new BrowserWindow({
     width: 420,
-    height: 380,
+    height: 340,
     resizable: false,
     title: "Swift Type — Settings",
     webPreferences: {
@@ -191,21 +191,18 @@ async function startRecording(): Promise<void> {
   recordingStartEpoch = Date.now();
   setTrayState("recording");
 
-  // Write audio to a temp file via Python recorder
   audioTempPath = path.join(app.getPath("temp"), `swifttype-${Date.now()}.wav`);
 
   const workerPath = app.isPackaged
     ? path.join(process.resourcesPath, "whisper_worker.py")
     : path.join(__dirname, "../src/whisper_worker.py");
 
-  // Start recording subprocess (runs until stopRecording sends SIGTERM)
   const recArgs = [workerPath, "--record", audioTempPath];
   if (settings.microphone && settings.microphone !== "default") {
     recArgs.push("--device", settings.microphone);
   }
   const rec = spawn(PYTHON, recArgs, { detached: false });
 
-  // Attach PID so stopRecording can kill it
   (global as Record<string, unknown>).__recorderPid = rec.pid;
   rec.on("error", () => { /* recorder not available in dev */ });
 }
@@ -214,7 +211,6 @@ async function stopRecording(): Promise<void> {
   if (!recordingActive) return;
   recordingActive = false;
 
-  // Kill the recorder subprocess
   const pid = (global as Record<string, unknown>).__recorderPid as number | undefined;
   if (pid) {
     try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
@@ -233,11 +229,57 @@ async function stopRecording(): Promise<void> {
   } catch (e) {
     console.error("Transcription failed:", e);
   } finally {
-    // Clean up temp audio file
     try { fs.unlinkSync(audioTempPath); } catch { /* ignore */ }
     audioTempPath = null;
     setTrayState("idle");
   }
+}
+
+// ─── Global keyboard hook (uIOhook) ──────────────────────────────────────────
+//
+// Three-finger left hand combo — Ctrl+Win+Alt
+// Hold all three to start recording, release any one to stop.
+
+const COMBO_KEYS = new Set<number>([
+  UiohookKey.Ctrl,       // 29
+  UiohookKey.CtrlRight,  // 3613
+  UiohookKey.Meta,       // 3675 — left Win
+  UiohookKey.MetaRight,  // 3676 — right Win
+  UiohookKey.Alt,        // 56
+  UiohookKey.AltRight,   // 3640
+]);
+
+const held = new Set<number>();
+
+function comboHeld(): boolean {
+  const hasCtrl = held.has(UiohookKey.Ctrl)  || held.has(UiohookKey.CtrlRight);
+  const hasMeta = held.has(UiohookKey.Meta)  || held.has(UiohookKey.MetaRight);
+  const hasAlt  = held.has(UiohookKey.Alt)   || held.has(UiohookKey.AltRight);
+  return hasCtrl && hasMeta && hasAlt;
+}
+
+function setupHook(): void {
+  uIOhook.on("keydown", (e) => {
+    if (!COMBO_KEYS.has(e.keycode)) return;
+    held.add(e.keycode);
+    if (comboHeld() && !recordingActive) {
+      console.log("[SwiftType] Combo held — starting recording");
+      startRecording();
+    }
+  });
+
+  uIOhook.on("keyup", (e) => {
+    if (!COMBO_KEYS.has(e.keycode)) return;
+    const wasCombo = comboHeld();
+    held.delete(e.keycode);
+    if (wasCombo && !comboHeld() && recordingActive) {
+      console.log("[SwiftType] Combo released — stopping recording");
+      stopRecording();
+    }
+  });
+
+  uIOhook.start();
+  console.log("[SwiftType] uIOhook started — hold Ctrl+Win+Alt to record");
 }
 
 // ─── IPC handlers (used by settings window) ──────────────────────────────────
@@ -245,38 +287,11 @@ async function stopRecording(): Promise<void> {
 ipcMain.handle("get-settings", () => settings);
 
 ipcMain.handle("save-settings", (_event, newSettings: Settings) => {
-  // Re-register hotkey if it changed
-  if (newSettings.hotkey !== settings.hotkey) {
-    globalShortcut.unregisterAll();
-    registerHotkey(newSettings.hotkey);
-  }
   settings = newSettings;
   saveSettings(settings);
 });
 
-ipcMain.handle("start-hotkey-capture", () => {
-  // Unregister all shortcuts so keydown events flow through to the renderer unblocked.
-  // The renderer adds its own keydown listener after this returns.
-  globalShortcut.unregisterAll();
-  if (settingsWindow) settingsWindow.focus();
-  return { ready: true };
-});
-
-ipcMain.handle("confirm-hotkey", (_event, accelerator: string) => {
-  // Called by renderer once it has captured the key combo.
-  // Register it immediately so the user can test it, update in-memory settings.
-  // The full settings.json write happens when the user clicks Save.
-  registerHotkey(accelerator);
-  settings.hotkey = accelerator;
-  // Echo back to renderer so it can update the display
-  if (settingsWindow) {
-    settingsWindow.webContents.send("hotkey-captured", accelerator);
-  }
-  return { ok: true };
-});
-
 ipcMain.handle("get-audio-devices", async () => {
-  // Returns a list of mic device names via Python helper
   return new Promise((resolve) => {
     const workerPath = app.isPackaged
       ? path.join(process.resourcesPath, "whisper_worker.py")
@@ -293,37 +308,16 @@ ipcMain.handle("get-audio-devices", async () => {
   });
 });
 
-// ─── Hotkey registration ──────────────────────────────────────────────────────
-
-function registerHotkey(accelerator: string): void {
-  const ok = globalShortcut.register(accelerator, () => {
-    console.log(`[SwiftType] Hotkey fired: ${accelerator} — recording=${recordingActive}`);
-    if (recordingActive) {
-      stopRecording();
-    } else {
-      startRecording();
-    }
-  });
-
-  if (ok) {
-    console.log(`[SwiftType] Hotkey registered: ${accelerator}`);
-  } else {
-    console.warn(`[SwiftType] FAILED to register hotkey: ${accelerator} — already in use by another app?`);
-  }
-}
-
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
-  // Prevent app from showing in taskbar / dock — tray only
   if (process.platform === "darwin") app.dock?.hide();
-
   createTray();
-  registerHotkey(settings.hotkey);
+  setupHook();
 });
 
 app.on("will-quit", () => {
-  globalShortcut.unregisterAll();
+  uIOhook.stop();
 });
 
 // Keep process alive with no windows open (tray app)

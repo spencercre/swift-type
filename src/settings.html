@@ -51,52 +51,6 @@
 
     select:focus { border-color: #555; }
 
-    /* Hotkey row */
-    .hotkey-row {
-      display: flex;
-      gap: 8px;
-      align-items: stretch;
-    }
-
-    .hotkey-btn {
-      flex: 1;
-      background: #262626;
-      border: 1px solid #404040;
-      border-radius: 5px;
-      color: #e5e5e5;
-      font-size: 13px;
-      font-family: inherit;
-      padding: 7px 10px;
-      text-align: left;
-      cursor: pointer;
-      outline: none;
-      transition: border-color 0.15s;
-      min-width: 0;
-    }
-
-    .hotkey-btn:hover { border-color: #555; }
-
-    .hotkey-btn.listening {
-      border-color: #666;
-      color: #888;
-      background: #1e1e1e;
-    }
-
-    .btn-test {
-      background: transparent;
-      border: 1px solid #404040;
-      border-radius: 5px;
-      color: #999;
-      font-size: 12px;
-      font-family: inherit;
-      padding: 7px 12px;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: border-color 0.15s, color 0.15s;
-    }
-
-    .btn-test:hover { border-color: #555; color: #ccc; }
-
     .hint {
       font-size: 11px;
       color: #666;
@@ -139,29 +93,6 @@
       min-height: 16px;
     }
 
-    /* Toast */
-    .toast {
-      position: fixed;
-      bottom: 64px;
-      left: 50%;
-      transform: translateX(-50%) translateY(8px);
-      background: #2a2a2a;
-      border: 1px solid #444;
-      border-radius: 7px;
-      color: #e5e5e5;
-      font-size: 12px;
-      padding: 10px 16px;
-      white-space: nowrap;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.2s ease, transform 0.2s ease;
-      z-index: 100;
-    }
-
-    .toast.show {
-      opacity: 1;
-      transform: translateX(-50%) translateY(0);
-    }
   </style>
 </head>
 <body>
@@ -176,11 +107,9 @@
 
   <div class="field">
     <label>Record Hotkey</label>
-    <div class="hotkey-row">
-      <button class="hotkey-btn" id="hotkeyBtn" type="button"></button>
-      <button class="btn-test" id="testBtn" type="button">Test</button>
+    <div style="background:#262626;border:1px solid #404040;border-radius:5px;padding:7px 10px;font-size:13px;color:#aaa;letter-spacing:0.02em;">
+      Hold <strong style="color:#e5e5e5;">Ctrl + Win + Alt</strong> to record, release to transcribe
     </div>
-    <p class="hint">Click the field to capture a new hotkey combination.</p>
   </div>
 
   <div class="field">
@@ -199,120 +128,12 @@
     <button class="btn-save" id="saveBtn">Save</button>
   </div>
 
-  <div class="toast" id="toast"></div>
-
   <script>
-    const api       = window.swiftType;
-    const micEl     = document.getElementById("mic");
-    const hotkeyBtn = document.getElementById("hotkeyBtn");
-    const testBtn   = document.getElementById("testBtn");
-    const modelEl   = document.getElementById("model");
-    const statusEl  = document.getElementById("status");
-    const saveBtn   = document.getElementById("saveBtn");
-    const toastEl   = document.getElementById("toast");
-
-    // ── Key name mappings ──────────────────────────────────────────────────────
-
-    const KEY_TO_ELECTRON = {
-      " ": "Space", "ArrowUp": "Up", "ArrowDown": "Down",
-      "ArrowLeft": "Left", "ArrowRight": "Right",
-      "Enter": "Return", "Escape": "Escape", "Tab": "Tab",
-      "Backspace": "Backspace", "Delete": "Delete",
-      "Home": "Home", "End": "End", "PageUp": "PageUp", "PageDown": "PageDown",
-    };
-
-    const ELECTRON_TO_WIN = {
-      "Control": "Ctrl", "CommandOrControl": "Ctrl",
-      "Super": "Win", "Meta": "Win",
-      "Return": "Enter", "Escape": "Esc",
-    };
-
-    const MODIFIERS = new Set(["Control", "Shift", "Alt", "Meta", "Super"]);
-
-    function electronToDisplay(accelerator) {
-      return accelerator
-        .split("+")
-        .map(tok => ELECTRON_TO_WIN[tok] ?? tok)
-        .join("+");
-    }
-
-    function eventToElectron(e) {
-      const mods = [];
-      if (e.ctrlKey)  mods.push("Control");
-      if (e.shiftKey) mods.push("Shift");
-      if (e.altKey)   mods.push("Alt");
-      if (e.metaKey)  mods.push("Super");
-
-      const raw = e.key;
-      if (MODIFIERS.has(raw) || raw === "Meta") return null;
-
-      let key = KEY_TO_ELECTRON[raw];
-      if (!key) key = raw.length === 1 ? raw.toUpperCase() : raw;
-      if (mods.length === 0) return null;
-
-      return [...mods, key].join("+");
-    }
-
-    // ── Toast ──────────────────────────────────────────────────────────────────
-
-    let toastTimer = null;
-
-    function showToast(msg) {
-      clearTimeout(toastTimer);
-      toastEl.textContent = msg;
-      toastEl.classList.add("show");
-      toastTimer = setTimeout(() => toastEl.classList.remove("show"), 3500);
-    }
-
-    // ── Hotkey capture ─────────────────────────────────────────────────────────
-
-    let capturedAccelerator = "CommandOrControl+Shift+Space";
-
-    function updateHotkeyBtn() {
-      hotkeyBtn.textContent = electronToDisplay(capturedAccelerator);
-    }
-
-    let captureListener = null;
-
-    hotkeyBtn.addEventListener("click", async () => {
-      if (captureListener) return;
-
-      hotkeyBtn.classList.add("listening");
-      hotkeyBtn.textContent = "Press your hotkey…";
-
-      // Ask main to unregister all shortcuts (so the keypress reaches us)
-      // and focus this window. Waits for main to confirm before listening.
-      await api.startHotkeyCapture();
-
-      captureListener = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        const accelerator = eventToElectron(e);
-        if (!accelerator) return;   // modifier-only, keep waiting
-
-        hotkeyBtn.classList.remove("listening");
-        hotkeyBtn.textContent = "Registering…";
-        window.removeEventListener("keydown", captureListener, true);
-        captureListener = null;
-
-        // Send to main: re-registers the shortcut, echoes hotkey-captured back
-        api.confirmHotkey(accelerator);
-      };
-
-      window.addEventListener("keydown", captureListener, true);
-    });
-
-    // Main confirmed the hotkey is registered — update display
-    api.onHotkeyCaptured((accelerator) => {
-      capturedAccelerator = accelerator;
-      updateHotkeyBtn();
-    });
-
-    testBtn.addEventListener("click", () => {
-      const display = electronToDisplay(capturedAccelerator);
-      showToast(`Hotkey active — press ${display} anywhere to record`);
-    });
+    const api      = window.swiftType;
+    const micEl    = document.getElementById("mic");
+    const modelEl  = document.getElementById("model");
+    const statusEl = document.getElementById("status");
+    const saveBtn  = document.getElementById("saveBtn");
 
     // ── Init ───────────────────────────────────────────────────────────────────
 
