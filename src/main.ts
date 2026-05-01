@@ -131,23 +131,35 @@ function transcribeAudio(audioPath: string): Promise<string> {
       ? path.join(process.resourcesPath, "whisper_worker.py")
       : path.join(__dirname, "../src/whisper_worker.py");
 
-    const proc = spawn(PYTHON, [workerPath, audioPath, settings.model], {
-      timeout: 60_000,
-    });
+    const args = [workerPath, audioPath, settings.model];
+    console.log(`[SwiftType] transcribe cmd: ${PYTHON} ${args.join(" ")}`);
+
+    const proc = spawn(PYTHON, args, { timeout: 60_000 });
 
     let out = "";
     let err = "";
-    proc.stdout.on("data", (d) => { out += d.toString(); });
-    proc.stderr.on("data", (d) => { err += d.toString(); });
+    proc.stdout.on("data", (d) => {
+      const chunk = d.toString();
+      out += chunk;
+      console.log(`[SwiftType] whisper stdout: ${chunk.trimEnd()}`);
+    });
+    proc.stderr.on("data", (d) => {
+      const chunk = d.toString();
+      err += chunk;
+      console.log(`[SwiftType] whisper stderr: ${chunk.trimEnd()}`);
+    });
 
     proc.on("close", (code) => {
+      console.log(`[SwiftType] whisper exited code=${code}`);
       if (code !== 0) {
         reject(new Error(`whisper_worker exited ${code}: ${err.trim()}`));
         return;
       }
       try {
         const result = JSON.parse(out.trim());
-        resolve((result.text ?? "").trim());
+        const text = (result.text ?? "").trim();
+        console.log(`[SwiftType] transcribed text: "${text}"`);
+        resolve(text);
       } catch {
         reject(new Error(`Bad JSON from whisper_worker: ${out}`));
       }
@@ -158,8 +170,12 @@ function transcribeAudio(audioPath: string): Promise<string> {
 // ─── Text injection via clipboard ────────────────────────────────────────────
 
 async function injectText(text: string): Promise<void> {
-  if (!text) return;
+  if (!text) {
+    console.log("[SwiftType] injectText: empty text — skipping paste");
+    return;
+  }
   clipboard.writeText(text);
+  console.log(`[SwiftType] clipboard set: "${text.length > 80 ? text.slice(0, 80) + "…" : text}"`);
 
   // Small delay so the target window can receive focus back
   await new Promise((r) => setTimeout(r, 150));
@@ -171,13 +187,15 @@ async function injectText(text: string): Promise<void> {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const robot = require("@jitsi/robotjs");
       robot.keyTap("v", ["control"]);
+      console.log("[SwiftType] paste sent via robotjs Ctrl+V");
     } catch {
-      // robotjs not available — clipboard is pre-loaded, user can paste manually
+      console.log("[SwiftType] robotjs unavailable — clipboard pre-loaded, paste manually");
     }
   } else {
     spawn("xdotool", ["key", "ctrl+v"]).on("error", () => {
-      // xdotool not installed — clipboard is pre-loaded
+      console.log("[SwiftType] xdotool unavailable — clipboard pre-loaded");
     });
+    console.log("[SwiftType] paste sent via xdotool Ctrl+V");
   }
 }
 
@@ -201,10 +219,12 @@ async function startRecording(): Promise<void> {
   if (settings.microphone && settings.microphone !== "default") {
     recArgs.push("--device", settings.microphone);
   }
+  console.log(`[SwiftType] recorder cmd: ${PYTHON} ${recArgs.join(" ")}`);
   const rec = spawn(PYTHON, recArgs, { detached: false });
 
   (global as Record<string, unknown>).__recorderPid = rec.pid;
-  rec.on("error", () => { /* recorder not available in dev */ });
+  rec.stderr?.on("data", (d) => console.log(`[SwiftType] recorder: ${d.toString().trimEnd()}`));
+  rec.on("error", (e) => console.error("[SwiftType] recorder spawn error:", e));
 }
 
 async function stopRecording(): Promise<void> {
@@ -216,7 +236,11 @@ async function stopRecording(): Promise<void> {
     try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
   }
 
-  if (!audioTempPath || !fs.existsSync(audioTempPath)) {
+  const wavExists = !!audioTempPath && fs.existsSync(audioTempPath);
+  const wavSize   = wavExists ? fs.statSync(audioTempPath!).size : 0;
+  console.log(`[SwiftType] WAV: path=${audioTempPath} exists=${wavExists} size=${wavSize}B`);
+
+  if (!audioTempPath || !wavExists) {
     setTrayState("idle");
     return;
   }
@@ -306,12 +330,36 @@ ipcMain.handle("get-audio-devices", async () => {
   });
 });
 
+// ─── Model preflight ─────────────────────────────────────────────────────────
+//
+// On first run, faster-whisper downloads ~150 MB. Run it at startup (tray-visible
+// but before the first recording) so the download doesn't stall a live session.
+
+function runPreflight(): void {
+  const workerPath = app.isPackaged
+    ? path.join(process.resourcesPath, "whisper_worker.py")
+    : path.join(__dirname, "../src/whisper_worker.py");
+
+  console.log(`[SwiftType] preflight: checking model '${settings.model}'…`);
+  const proc = spawn(PYTHON, [workerPath, "--preflight", settings.model]);
+  proc.stderr?.on("data", (d) => console.log(`[SwiftType] preflight: ${d.toString().trimEnd()}`));
+  proc.on("close", (code) => {
+    if (code === 0) {
+      console.log(`[SwiftType] preflight: model '${settings.model}' ready`);
+    } else {
+      console.warn(`[SwiftType] preflight: exited ${code} — model may download on first transcription`);
+    }
+  });
+  proc.on("error", (e) => console.warn("[SwiftType] preflight spawn error:", e));
+}
+
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
   if (process.platform === "darwin") app.dock?.hide();
   createTray();
   setupHook();
+  runPreflight();
 });
 
 app.on("will-quit", () => {

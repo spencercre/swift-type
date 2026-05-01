@@ -2,14 +2,18 @@
 """
 whisper_worker.py — Swift Type audio backend
 
-Three modes:
-  python3 whisper_worker.py --list-devices
+Modes:
+  --list-devices
       Prints JSON array of available input devices to stdout.
 
-  python3 whisper_worker.py --record <output.wav> [--device <name>]
+  --preflight <model>
+      Loads (and downloads if missing) the Whisper model. Run at app startup
+      so the first real recording doesn't stall waiting for a 150 MB download.
+
+  --record <output.wav> [--device <name>]
       Records from microphone until SIGTERM, writes WAV to output path.
 
-  python3 whisper_worker.py <audio.wav> <model>
+  <audio.wav> <model>
       Transcribes audio file, prints {"text": "..."} JSON to stdout.
 """
 
@@ -18,7 +22,15 @@ import os
 import signal
 import sys
 import wave
-import tempfile
+
+# Shared cache dir — same location used for both preflight and transcription.
+# Defaults to ~/.cache/huggingface/hub (HuggingFace standard, writable everywhere).
+CACHE_DIR = os.path.expanduser("~/.cache/huggingface/hub")
+
+
+def model_cache_path(model_size: str) -> str:
+    """Returns the expected cache directory for a given model size."""
+    return os.path.join(CACHE_DIR, f"models--Systran--faster-whisper-{model_size}")
 
 
 # ─── List devices ─────────────────────────────────────────────────────────────
@@ -39,6 +51,29 @@ def list_devices():
     except Exception as e:
         print(json.dumps([]), file=sys.stdout)
         print(f"list_devices error: {e}", file=sys.stderr)
+
+
+# ─── Preflight ────────────────────────────────────────────────────────────────
+
+def preflight(model_size: str):
+    """Load (downloading if needed) the Whisper model before the first recording."""
+    cached = os.path.isdir(model_cache_path(model_size))
+    sys.stderr.write(f"[preflight] model='{model_size}' cached={cached} cache_dir={CACHE_DIR}\n")
+
+    if not cached:
+        sys.stderr.write(f"[preflight] Downloading model '{model_size}' (~150 MB) — please wait…\n")
+
+    try:
+        from faster_whisper import WhisperModel
+        WhisperModel(model_size, device="cpu", compute_type="auto", download_root=CACHE_DIR)
+        sys.stderr.write(f"[preflight] Model '{model_size}' ready.\n")
+        sys.exit(0)
+    except ImportError:
+        sys.stderr.write("[preflight] faster-whisper not installed. Run: pip install faster-whisper\n")
+        sys.exit(1)
+    except Exception as e:
+        sys.stderr.write(f"[preflight] Failed: {e}\n")
+        sys.exit(1)
 
 
 # ─── Record ───────────────────────────────────────────────────────────────────
@@ -130,8 +165,7 @@ def transcribe(audio_path: str, model_size: str = "base"):
             model_size,
             device="cpu",
             compute_type="auto",
-            # Cache models next to the script in dev, or in resources dir when packaged
-            download_root=os.path.join(os.path.dirname(__file__), "..", ".whisper-cache"),
+            download_root=CACHE_DIR,
         )
 
         segments, _info = model.transcribe(
@@ -160,6 +194,10 @@ def main():
 
     if args[0] == "--list-devices":
         list_devices()
+
+    elif args[0] == "--preflight":
+        model_size = args[1] if len(args) > 1 else "base"
+        preflight(model_size)
 
     elif args[0] == "--record":
         if len(args) < 2:
