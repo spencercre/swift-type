@@ -5,6 +5,8 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  Notification,
+  screen,
   Tray,
 } from "electron";
 import { uIOhook, UiohookKey } from "uiohook-napi";
@@ -21,8 +23,16 @@ type TrayState = "idle" | "recording" | "transcribing" | "warning";
 let tray: Tray | null = null;
 let settingsWindow: BrowserWindow | null = null;
 let probeWindow: BrowserWindow | null = null;
+let onboardingWindow: BrowserWindow | null = null;
+let onboardingShouldStartPulse = false;
 let recordingActive = false;
 let recordingStartEpoch = 0;
+
+// ── Phase 2 pulse state — coral↔amber tray flicker after onboarding "I'm ready"
+let pulseActive = false;
+let pulseInterval: NodeJS.Timeout | null = null;
+let pulseTimeoutHandle: NodeJS.Timeout | null = null;
+let pulseToggle = false;
 
 // Settings window opens directly on the mic dropdown when this flag is set
 // (e.g. after a left-click on the warning tray icon).
@@ -38,6 +48,7 @@ interface Settings {
   microphone: ResolvedMic | null;
   micUserSelected: boolean;
   model: "tiny" | "base" | "small";
+  onboardingCompleted: boolean;
 }
 
 const SETTINGS_PATH = path.join(app.getPath("userData"), "settings.json");
@@ -47,7 +58,10 @@ const LOG_PATH = path.join(app.getPath("userData"), "swift-speak.log");
 // (and the older productName-shaped %APPDATA%\Swift Type, just in case) into the
 // new userData directory, then remove the legacy folder. Runs synchronously
 // before settings load so we read from the right place on the first 2.0 launch.
-function migrateLegacyUserData(): void {
+//
+// Returns whether a settings.json was found in the legacy location — used by
+// the caller to mark onboarding complete (1.x users already know the app).
+function migrateLegacyUserData(): { migratedSettings: boolean } {
   const newDir = app.getPath("userData");
   const appData = path.dirname(newDir);
   const legacyCandidates = [
@@ -55,9 +69,15 @@ function migrateLegacyUserData(): void {
     path.join(appData, "Swift Type"),
   ];
 
+  let migratedSettings = false;
+
   for (const oldDir of legacyCandidates) {
     if (oldDir === newDir) continue;
     if (!fs.existsSync(oldDir)) continue;
+
+    if (fs.existsSync(path.join(oldDir, "settings.json"))) {
+      migratedSettings = true;
+    }
 
     try {
       if (!fs.existsSync(newDir)) fs.mkdirSync(newDir, { recursive: true });
@@ -85,9 +105,11 @@ function migrateLegacyUserData(): void {
       console.warn(`[SwiftSpeak] legacy migration from ${oldDir} failed:`, e);
     }
   }
+
+  return { migratedSettings };
 }
 
-migrateLegacyUserData();
+const migration = migrateLegacyUserData();
 
 function loadSettings(): Settings {
   try {
@@ -105,12 +127,13 @@ function loadSettings(): Settings {
         microphone: mic,
         micUserSelected: !!raw.micUserSelected,
         model,
+        onboardingCompleted: !!raw.onboardingCompleted,
       };
     }
   } catch {
     // fall through to defaults
   }
-  return { microphone: null, micUserSelected: false, model: "base" };
+  return { microphone: null, micUserSelected: false, model: "base", onboardingCompleted: false };
 }
 
 function saveSettings(s: Settings): void {
@@ -118,6 +141,15 @@ function saveSettings(s: Settings): void {
 }
 
 let settings = loadSettings();
+
+// Users upgrading from Swift Type 1.x already know how the app works — don't
+// hit them with a welcome tour. Honour the migration even if their old
+// settings.json had no onboardingCompleted field at all (1.x didn't have it).
+if (migration.migratedSettings && !settings.onboardingCompleted) {
+  settings.onboardingCompleted = true;
+  saveSettings(settings);
+  console.log("[SwiftSpeak] migrated 1.x user — marking onboarding complete");
+}
 
 // ─── Tray icons — loaded from assets/ ────────────────────────────────────────
 
@@ -143,6 +175,8 @@ let trayState: TrayState = "idle";
 function setTrayState(state: TrayState): void {
   trayState = state;
   if (!tray) return;
+  // Don't fight the pulse — it owns the icon while running.
+  if (pulseActive && state === "idle") return;
   tray.setImage(ICON[state]());
   if (state === "warning") {
     tray.setToolTip("Swift Speak: No microphone selected — right-click to open Settings");
@@ -166,14 +200,32 @@ function createTray(): void {
     { label: "Swift Speak", enabled: false },
     { type: "separator" },
     { label: "Settings", click: () => openSettings() },
+    { label: "Show Welcome Tour", click: () => resetOnboardingForNextLaunch() },
     { type: "separator" },
     { label: "Quit", click: () => app.quit() },
   ]);
   tray.setContextMenu(menu);
 
   tray.on("click", () => {
+    if (pulseActive) stopPulse("tray-click");
     openSettings({ focusMic: trayState === "warning" });
   });
+}
+
+function resetOnboardingForNextLaunch(): void {
+  settings.onboardingCompleted = false;
+  saveSettings(settings);
+  console.log("[SwiftSpeak] welcome tour reset — will show on next launch");
+  if (Notification.isSupported()) {
+    try {
+      new Notification({
+        title: "Welcome tour reset",
+        body: "It’ll appear the next time you start Swift Speak.",
+        icon: assetIcon("icon-idle.png"),
+        silent: true,
+      }).show();
+    } catch { /* notifications optional */ }
+  }
 }
 
 // ─── Settings window ─────────────────────────────────────────────────────────
@@ -213,6 +265,124 @@ function openSettings(opts: { focusMic?: boolean } = {}): void {
   settingsWindow.setIcon(assetIcon("icon-idle.png"));
   settingsWindow.on("closed", () => { settingsWindow = null; });
   settingsWindow.setMenu(null);
+}
+
+// ─── Onboarding window (3-slide first-launch tour) ───────────────────────────
+
+function openOnboarding(): void {
+  if (onboardingWindow) {
+    onboardingWindow.focus();
+    return;
+  }
+
+  const primary = screen.getPrimaryDisplay().workArea;
+  const width = 520;
+  const height = 420;
+  const x = Math.round(primary.x + (primary.width - width) / 2);
+  const y = Math.round(primary.y + (primary.height - height) / 2);
+
+  onboardingWindow = new BrowserWindow({
+    width,
+    height,
+    x,
+    y,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: false,
+    show: false,
+    backgroundColor: "#00000000",
+    title: "Welcome to Swift Speak",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  // Slide 2's "Test mic" needs media access.
+  onboardingWindow.webContents.session.setPermissionRequestHandler(
+    (_wc, permission, callback) => callback(permission === "media")
+  );
+
+  const onboardingPath = app.isPackaged
+    ? path.join(process.resourcesPath, "src", "onboarding.html")
+    : path.join(__dirname, "../src/onboarding.html");
+  onboardingWindow.loadFile(onboardingPath);
+  onboardingWindow.setMenu(null);
+  onboardingWindow.once("ready-to-show", () => onboardingWindow?.show());
+
+  onboardingWindow.on("closed", () => {
+    onboardingWindow = null;
+    if (onboardingShouldStartPulse) {
+      onboardingShouldStartPulse = false;
+      startPulse();
+    }
+  });
+}
+
+// ─── Phase 2: post-onboarding pulse + native toast ──────────────────────────
+
+function startPulse(): void {
+  if (pulseActive) return;
+  pulseActive = true;
+  pulseToggle = false;
+
+  // Fire the toast immediately. On click, settle the pulse and open settings.
+  if (Notification.isSupported()) {
+    try {
+      const toast = new Notification({
+        title: "Swift Speak is ready",
+        body: "Hold Ctrl+` anywhere to start dictating. Click here to open settings.",
+        icon: assetIcon("icon-idle.png"),
+        silent: false,
+      });
+      toast.on("click", () => {
+        if (pulseActive) stopPulse("toast-click");
+        openSettings();
+      });
+      toast.show();
+    } catch (e) {
+      console.warn("[SwiftSpeak] toast failed:", e);
+    }
+  }
+
+  // Slow ~1.5s coral↔amber swap. The existing `icon-idle.png` is already coral
+  // (#E8735A) and `tray-warning.png` is amber (#F5A623), so reuse them.
+  pulseInterval = setInterval(() => {
+    if (!tray) return;
+    pulseToggle = !pulseToggle;
+    tray.setImage(assetIcon(pulseToggle ? "tray-warning.png" : "icon-idle.png"));
+  }, 1500);
+
+  pulseTimeoutHandle = setTimeout(() => stopPulse("timeout"), 60_000);
+
+  console.log("[SwiftSpeak] post-onboarding pulse started");
+}
+
+function stopPulse(reason: string): void {
+  if (!pulseActive) return;
+  pulseActive = false;
+
+  if (pulseInterval) { clearInterval(pulseInterval); pulseInterval = null; }
+  if (pulseTimeoutHandle) { clearTimeout(pulseTimeoutHandle); pulseTimeoutHandle = null; }
+
+  // Settle to whatever steady state the app should be in (coral idle if we
+  // have a mic, warning if we don't).
+  if (tray) {
+    const restState: TrayState = settings.microphone ? "idle" : "warning";
+    trayState = restState;
+    tray.setImage(ICON[restState]());
+  }
+
+  const ts = new Date().toISOString();
+  const msg = `[${ts}] [SwiftSpeak] post-onboarding pulse ended: ${reason}\n`;
+  try { fs.appendFileSync(LOG_PATH, msg); } catch { /* ignore */ }
+  console.log(msg.trim());
 }
 
 // ─── Mic probe (runs at startup in a hidden window) ──────────────────────────
@@ -482,6 +652,7 @@ function setupHook(): void {
     if (!COMBO_KEYS.has(e.keycode)) return;
     held.add(e.keycode);
     if (comboHeld() && !recordingActive) {
+      if (pulseActive) stopPulse("hotkey-first-fire");
       console.log("[SwiftSpeak] Combo held — starting recording");
       startRecording();
     }
@@ -506,14 +677,26 @@ function setupHook(): void {
 ipcMain.handle("get-settings", () => settings);
 
 ipcMain.handle("save-settings", (_event, newSettings: Partial<Settings>) => {
+  // Use `in` checks so callers can do partial updates (onboarding only sends
+  // microphone + micUserSelected). Without this, a partial save would clobber
+  // the unset fields back to their defaults.
   const merged: Settings = {
-    microphone: newSettings.microphone ?? null,
-    micUserSelected: newSettings.micUserSelected ?? settings.micUserSelected,
-    model: (newSettings.model as Settings["model"]) ?? settings.model,
+    microphone: "microphone" in (newSettings || {})
+      ? (newSettings.microphone ?? null)
+      : settings.microphone,
+    micUserSelected: "micUserSelected" in (newSettings || {})
+      ? !!newSettings.micUserSelected
+      : settings.micUserSelected,
+    model: "model" in (newSettings || {}) && newSettings.model
+      ? (newSettings.model as Settings["model"])
+      : settings.model,
+    onboardingCompleted: "onboardingCompleted" in (newSettings || {})
+      ? !!newSettings.onboardingCompleted
+      : settings.onboardingCompleted,
   };
   settings = merged;
   saveSettings(settings);
-  setTrayState(settings.microphone ? "idle" : "warning");
+  if (!pulseActive) setTrayState(settings.microphone ? "idle" : "warning");
 });
 
 ipcMain.handle("get-audio-devices", async () => {
@@ -545,6 +728,26 @@ ipcMain.handle("settings-focus-mic-flag", () => {
   const flag = settingsFocusMicOnce;
   settingsFocusMicOnce = false;
   return flag;
+});
+
+ipcMain.handle("onboarding-complete", () => {
+  settings.onboardingCompleted = true;
+  saveSettings(settings);
+  onboardingShouldStartPulse = true;
+  if (onboardingWindow && !onboardingWindow.isDestroyed()) {
+    try { onboardingWindow.close(); } catch { /* ignore */ }
+  }
+  return true;
+});
+
+ipcMain.handle("onboarding-skip", () => {
+  settings.onboardingCompleted = true;
+  saveSettings(settings);
+  onboardingShouldStartPulse = false;
+  if (onboardingWindow && !onboardingWindow.isDestroyed()) {
+    try { onboardingWindow.close(); } catch { /* ignore */ }
+  }
+  return true;
 });
 
 // ─── Model preflight ─────────────────────────────────────────────────────────
@@ -579,6 +782,12 @@ app.whenReady().then(() => {
   setupHook();
   runPreflight();
   startMicProbe();
+
+  // Show onboarding on top of the now-visible tray. Slide 3's arrow points at
+  // the tray, so the tray needs to exist before the window appears.
+  if (!settings.onboardingCompleted) {
+    openOnboarding();
+  }
 });
 
 app.on("will-quit", () => {

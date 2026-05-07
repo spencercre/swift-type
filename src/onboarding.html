@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; media-src blob:" />
+  <title>Welcome to Swift Speak</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      width: 520px;
+      height: 420px;
+      overflow: hidden;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", sans-serif;
+      background: #FDF6E9;
+      color: #2A2A2A;
+      border-radius: 14px;
+      user-select: none;
+      -webkit-app-region: drag;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 0 2px 24px rgba(0, 0, 0, 0.18);
+    }
+
+    .slides {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .slide {
+      position: absolute;
+      inset: 0;
+      padding: 28px 40px 8px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s ease-out;
+    }
+    .slide.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .bird {
+      width: 56px;
+      height: 56px;
+      margin-bottom: 14px;
+      image-rendering: -webkit-optimize-contrast;
+    }
+
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+      color: #2A2A2A;
+      margin-bottom: 8px;
+    }
+
+    .subhead {
+      font-size: 14px;
+      color: #7a6f5a;
+      margin-bottom: 18px;
+    }
+
+    .helper {
+      font-size: 12px;
+      color: #8a7f6a;
+      line-height: 1.5;
+      margin-top: 8px;
+    }
+
+    code.kbd {
+      display: inline-block;
+      background: #fff;
+      border: 1px solid #e6d8b8;
+      border-radius: 5px;
+      padding: 1px 7px;
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 0.92em;
+      color: #2A2A2A;
+    }
+
+    button, select, .skip {
+      -webkit-app-region: no-drag;
+    }
+
+    button.cta {
+      background: #5BA4A4;
+      color: #fff;
+      border: none;
+      border-radius: 9px;
+      padding: 10px 28px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.01em;
+      transition: background 0.15s;
+      margin-top: auto;
+    }
+    button.cta:hover { background: #4d8e8e; }
+    button.cta:active { transform: translateY(1px); }
+    button.cta:disabled { opacity: 0.55; cursor: default; }
+
+    button.test-btn {
+      background: transparent;
+      color: #E8735A;
+      border: 1px solid #E8735A;
+      border-radius: 8px;
+      padding: 6px 14px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button.test-btn:hover { background: rgba(232, 115, 90, 0.08); }
+    button.test-btn:disabled { opacity: 0.55; cursor: default; }
+
+    select.mic-select {
+      width: 320px;
+      padding: 8px 12px;
+      font-size: 13px;
+      border: 1px solid #e6d8b8;
+      border-radius: 8px;
+      background: #fff;
+      color: #2A2A2A;
+      outline: none;
+      appearance: none;
+    }
+    select.mic-select:focus { border-color: #5BA4A4; }
+
+    .mic-row {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+
+    .waveform {
+      width: 220px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+    .waveform.active { opacity: 1; }
+    .waveform .bar {
+      width: 4px;
+      background: #E8735A;
+      border-radius: 2px;
+      transform-origin: center;
+    }
+    .waveform.active .bar {
+      animation: wave 0.7s ease-in-out infinite alternate;
+    }
+    .waveform .bar:nth-child(1) { height: 8px;  animation-delay: 0.00s; }
+    .waveform .bar:nth-child(2) { height: 16px; animation-delay: 0.08s; }
+    .waveform .bar:nth-child(3) { height: 24px; animation-delay: 0.16s; }
+    .waveform .bar:nth-child(4) { height: 18px; animation-delay: 0.24s; }
+    .waveform .bar:nth-child(5) { height: 26px; animation-delay: 0.16s; }
+    .waveform .bar:nth-child(6) { height: 14px; animation-delay: 0.08s; }
+    .waveform .bar:nth-child(7) { height: 8px;  animation-delay: 0.00s; }
+    @keyframes wave {
+      from { transform: scaleY(0.3); }
+      to   { transform: scaleY(1); }
+    }
+
+    .keys-anim {
+      width: 240px;
+      height: 76px;
+      margin: 6px 0 10px;
+    }
+
+    .arrow-row {
+      margin-top: 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: #7a6f5a;
+    }
+    .arrow-row .mini-bird {
+      width: 18px;
+      height: 18px;
+      image-rendering: -webkit-optimize-contrast;
+    }
+
+    .footer {
+      padding: 12px 20px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .skip {
+      background: none;
+      border: none;
+      color: #b3a691;
+      cursor: pointer;
+      font-size: 12px;
+      text-decoration: underline;
+      padding: 4px 6px;
+    }
+    .skip:hover { color: #8a7f6a; }
+    .skip.hidden { visibility: hidden; }
+
+    .dots { display: flex; gap: 7px; }
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #e6d8b8;
+      transition: background 0.18s;
+    }
+    .dot.active { background: #E8735A; }
+
+    .footer-spacer { width: 36px; }
+  </style>
+</head>
+<body>
+  <div class="slides">
+    <!-- Slide 1 — Welcome -->
+    <section class="slide active" data-slide="1">
+      <img class="bird" src="../assets/icon-idle.png" alt="" />
+      <h1>Stop typing. Start speaking.</h1>
+      <p class="subhead">Hold a key. Speak. Done. That's the whole app.</p>
+      <button class="cta" id="cta-1">Let's go</button>
+    </section>
+
+    <!-- Slide 2 — Mic -->
+    <section class="slide" data-slide="2">
+      <img class="bird" src="../assets/icon-idle.png" alt="" />
+      <h1>Pick your microphone</h1>
+      <div class="mic-row">
+        <select id="mic-select" class="mic-select"><option>Loading…</option></select>
+        <button class="test-btn" id="test-btn">Test mic</button>
+        <div class="waveform" id="waveform">
+          <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+          <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+          <div class="bar"></div>
+        </div>
+        <p class="helper" id="mic-helper">Hear yourself? You're set.</p>
+      </div>
+      <button class="cta" id="cta-2">Continue</button>
+    </section>
+
+    <!-- Slide 3 — Try it -->
+    <section class="slide" data-slide="3">
+      <img class="bird" src="../assets/icon-idle.png" alt="" />
+      <h1>Hold <code class="kbd">Ctrl</code> + <code class="kbd">`</code> and speak.</h1>
+      <svg class="keys-anim" viewBox="0 0 240 76" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <!-- Ctrl key -->
+        <g>
+          <rect x="8" y="14" width="64" height="44" rx="7" fill="#fff" stroke="#E8735A" stroke-width="2">
+            <animate attributeName="fill"
+                     values="#fff;#E8735A;#E8735A;#fff;#fff"
+                     keyTimes="0;0.18;0.7;0.85;1"
+                     dur="2s" repeatCount="indefinite"/>
+          </rect>
+          <text x="40" y="42" text-anchor="middle" font-family="-apple-system,Segoe UI,sans-serif" font-size="13" font-weight="600" fill="#2A2A2A">
+            <animate attributeName="fill"
+                     values="#2A2A2A;#fff;#fff;#2A2A2A;#2A2A2A"
+                     keyTimes="0;0.18;0.7;0.85;1"
+                     dur="2s" repeatCount="indefinite"/>
+            Ctrl
+          </text>
+        </g>
+        <text x="86" y="44" text-anchor="middle" font-family="sans-serif" font-size="18" fill="#b3a691">+</text>
+        <!-- Backtick key -->
+        <g>
+          <rect x="100" y="14" width="44" height="44" rx="7" fill="#fff" stroke="#E8735A" stroke-width="2">
+            <animate attributeName="fill"
+                     values="#fff;#fff;#E8735A;#E8735A;#fff;#fff"
+                     keyTimes="0;0.28;0.4;0.7;0.85;1"
+                     dur="2s" repeatCount="indefinite"/>
+          </rect>
+          <text x="122" y="44" text-anchor="middle" font-family="Cascadia Mono,Consolas,monospace" font-size="20" fill="#2A2A2A">
+            <animate attributeName="fill"
+                     values="#2A2A2A;#2A2A2A;#fff;#fff;#2A2A2A;#2A2A2A"
+                     keyTimes="0;0.28;0.4;0.7;0.85;1"
+                     dur="2s" repeatCount="indefinite"/>
+            `
+          </text>
+        </g>
+        <!-- Speech bubble -->
+        <g opacity="0">
+          <animate attributeName="opacity"
+                   values="0;0;0;1;1;0"
+                   keyTimes="0;0.4;0.55;0.7;0.92;1"
+                   dur="2s" repeatCount="indefinite"/>
+          <rect x="160" y="12" width="74" height="32" rx="14" fill="#5BA4A4"/>
+          <polygon points="172,42 178,52 184,42" fill="#5BA4A4"/>
+          <text x="197" y="32" text-anchor="middle" font-family="-apple-system,Segoe UI,sans-serif" font-size="12" fill="#fff" font-weight="500">hello!</text>
+        </g>
+      </svg>
+      <p class="helper">Open Notepad or anywhere you can type. Hold the keys, speak a sentence, release.<br>We'll be in your system tray when you need us.</p>
+      <div class="arrow-row">
+        <img class="mini-bird" src="../assets/icon-idle.png" alt="" />
+        <span>↘ Look here</span>
+      </div>
+      <button class="cta" id="cta-3">I'm ready</button>
+    </section>
+  </div>
+
+  <div class="footer">
+    <button class="skip" id="skip-btn">Skip</button>
+    <div class="dots">
+      <div class="dot active" data-dot="1"></div>
+      <div class="dot" data-dot="2"></div>
+      <div class="dot" data-dot="3"></div>
+    </div>
+    <div class="footer-spacer"></div>
+  </div>
+
+  <script src="mic-utils.js"></script>
+  <script>
+    const api = window.swiftSpeak;
+
+    let currentSlide = 1;
+    function showSlide(n) {
+      currentSlide = n;
+      document.querySelectorAll('.slide').forEach((s) => {
+        s.classList.toggle('active', Number(s.dataset.slide) === n);
+      });
+      document.querySelectorAll('.dot').forEach((d) => {
+        d.classList.toggle('active', Number(d.dataset.dot) === n);
+      });
+      document.getElementById('skip-btn').classList.toggle('hidden', n === 3);
+    }
+
+    document.getElementById('cta-1').addEventListener('click', () => {
+      showSlide(2);
+      loadMics();
+    });
+
+    document.getElementById('cta-2').addEventListener('click', async () => {
+      const sel = document.getElementById('mic-select');
+      const opt = sel.options[sel.selectedIndex];
+      if (opt && opt.dataset && opt.dataset.deviceId) {
+        const microphone = {
+          label: opt.dataset.label || opt.textContent || "",
+          deviceId: opt.dataset.deviceId,
+        };
+        try {
+          await api.saveSettings({ microphone, micUserSelected: true });
+        } catch (e) {
+          console.warn("[SwiftSpeak] onboarding: failed to save mic:", e);
+        }
+      }
+      showSlide(3);
+    });
+
+    document.getElementById('cta-3').addEventListener('click', async () => {
+      try { await api.completeOnboarding(); } catch (e) { console.error(e); }
+    });
+
+    document.getElementById('skip-btn').addEventListener('click', async () => {
+      try { await api.skipOnboarding(); } catch (e) { console.error(e); }
+    });
+
+    // ── Slide 2: mic enumeration ──────────────────────────────────────────
+    let micsLoaded = false;
+    async function loadMics() {
+      if (micsLoaded) return;
+      micsLoaded = true;
+      const sel = document.getElementById('mic-select');
+      sel.innerHTML = '';
+      try {
+        const inputs = await SwiftSpeakMic.listInputDevices();
+        if (inputs.length === 0) {
+          const opt = document.createElement('option');
+          opt.textContent = 'No microphones found';
+          opt.value = '';
+          sel.appendChild(opt);
+          document.getElementById('test-btn').disabled = true;
+          return;
+        }
+
+        const settings = await api.getSettings();
+        const saved = settings && settings.microphone;
+        let preferredId = '';
+        if (saved && saved.label) {
+          const m =
+            inputs.find((d) => d.label === saved.label) ||
+            (saved.deviceId ? inputs.find((d) => d.deviceId === saved.deviceId) : null);
+          if (m) preferredId = m.deviceId;
+        }
+        if (!preferredId) preferredId = inputs[0].deviceId;
+
+        inputs.forEach((d) => {
+          const opt = document.createElement('option');
+          opt.value = d.deviceId;
+          opt.textContent = d.label || `(unnamed device ${d.deviceId.slice(0, 6)})`;
+          opt.dataset.label = d.label || '';
+          opt.dataset.deviceId = d.deviceId;
+          if (d.deviceId === preferredId) opt.selected = true;
+          sel.appendChild(opt);
+        });
+      } catch (e) {
+        console.error("[SwiftSpeak] onboarding mic enum failed:", e);
+        sel.innerHTML = '<option value="">No microphones available</option>';
+        document.getElementById('test-btn').disabled = true;
+      }
+    }
+
+    // ── Slide 2: 2-second test record + playback ─────────────────────────
+    let testInProgress = false;
+    document.getElementById('test-btn').addEventListener('click', async () => {
+      if (testInProgress) return;
+      const btn = document.getElementById('test-btn');
+      const wave = document.getElementById('waveform');
+      const helper = document.getElementById('mic-helper');
+      const sel = document.getElementById('mic-select');
+      const opt = sel.options[sel.selectedIndex];
+      const deviceId = opt && opt.dataset && opt.dataset.deviceId;
+      if (!deviceId) return;
+
+      testInProgress = true;
+      btn.disabled = true;
+      btn.textContent = 'Listening…';
+      helper.textContent = 'Recording 2 seconds…';
+      let stream = null;
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { exact: deviceId } },
+        });
+        const recorder = new MediaRecorder(stream);
+        const chunks = [];
+        recorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+        recorder.onstop = async () => {
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+          if (chunks.length === 0) {
+            btn.textContent = 'Test mic';
+            btn.disabled = false;
+            helper.textContent = 'No audio captured — check the mic.';
+            testInProgress = false;
+            return;
+          }
+          const blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
+          const url = URL.createObjectURL(blob);
+          const audio = new Audio(url);
+          btn.textContent = 'Playing back…';
+          helper.textContent = 'Hear yourself? You’re set.';
+          wave.classList.add('active');
+          const cleanup = () => {
+            wave.classList.remove('active');
+            btn.disabled = false;
+            btn.textContent = 'Test mic';
+            URL.revokeObjectURL(url);
+            testInProgress = false;
+          };
+          audio.onended = cleanup;
+          audio.onerror = cleanup;
+          try { await audio.play(); }
+          catch (e) {
+            console.warn("[SwiftSpeak] onboarding: playback failed:", e);
+            cleanup();
+          }
+        };
+        recorder.start();
+        setTimeout(() => {
+          if (recorder.state === 'recording') recorder.stop();
+        }, 2000);
+      } catch (e) {
+        console.error("[SwiftSpeak] onboarding: mic test failed:", e);
+        if (stream) stream.getTracks().forEach((t) => t.stop());
+        btn.disabled = false;
+        btn.textContent = 'Test mic';
+        helper.textContent = 'Couldn’t reach that mic — try another.';
+        testInProgress = false;
+      }
+    });
+  </script>
+</body>
+</html>

@@ -7,21 +7,9 @@
   <title>Swift Speak — Mic Probe</title>
 </head>
 <body>
+<script src="mic-utils.js"></script>
 <script>
 (async () => {
-  const VIRTUAL_PATTERNS = [
-    "stereo mix",
-    "what u hear",
-    "microsoft sound mapper",
-    "primary sound capture driver",
-    "voicemeeter",
-    "vb-audio",
-  ];
-  const isVirtual = (label) => {
-    const l = (label || "").toLowerCase();
-    return VIRTUAL_PATTERNS.some((p) => l.includes(p));
-  };
-
   const send = (result) => window.swiftSpeak.micProbeResult(result);
 
   try {
@@ -45,9 +33,7 @@
     const all = await navigator.mediaDevices.enumerateDevices();
     permStream.getTracks().forEach((t) => t.stop());
 
-    const inputs = all.filter(
-      (d) => d.kind === "audioinput" && !isVirtual(d.label) && d.deviceId && d.deviceId !== "default"
-    );
+    const inputs = SwiftSpeakMic.filterInputs(all);
 
     const savedLabel = saved && saved.label ? saved.label : null;
     const savedId = saved && saved.deviceId ? saved.deviceId : null;

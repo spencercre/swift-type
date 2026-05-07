@@ -128,44 +128,13 @@
     <button class="btn-save" id="saveBtn">Save</button>
   </div>
 
+  <script src="mic-utils.js"></script>
   <script>
     const api      = window.swiftSpeak;
     const micEl    = document.getElementById("mic");
     const modelEl  = document.getElementById("model");
     const statusEl = document.getElementById("status");
     const saveBtn  = document.getElementById("saveBtn");
-
-    const VIRTUAL_PATTERNS = [
-      "stereo mix",
-      "what u hear",
-      "microsoft sound mapper",
-      "primary sound capture driver",
-      "voicemeeter",
-      "vb-audio",
-    ];
-    const isVirtual = (label) => {
-      const l = (label || "").toLowerCase();
-      return VIRTUAL_PATTERNS.some((p) => l.includes(p));
-    };
-
-    async function listInputDevices() {
-      let permStream = null;
-      try {
-        permStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      } catch (e) {
-        // Without permission, labels will be empty — still fall through.
-        console.warn("[SwiftSpeak] settings: mic permission denied:", e && e.message);
-      }
-      const all = await navigator.mediaDevices.enumerateDevices();
-      if (permStream) permStream.getTracks().forEach((t) => t.stop());
-      return all.filter(
-        (d) =>
-          d.kind === "audioinput" &&
-          !isVirtual(d.label) &&
-          d.deviceId &&
-          d.deviceId !== "default"
-      );
-    }
 
     function clearMicOptions() {
       while (micEl.options.length > 1) micEl.remove(1);
@@ -175,7 +144,7 @@
       const settings = await api.getSettings();
       const focusMic = await api.shouldFocusMic();
 
-      const inputs = await listInputDevices();
+      const inputs = await SwiftSpeakMic.listInputDevices();
       clearMicOptions();
       inputs.forEach((d) => {
         const opt = document.createElement("option");
