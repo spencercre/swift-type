@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self'; script-src 'self' 'unsafe-inline'" />
+  <title>Swift Type — Mic Probe</title>
+</head>
+<body>
+<script>
+(async () => {
+  const VIRTUAL_PATTERNS = [
+    "stereo mix",
+    "what u hear",
+    "microsoft sound mapper",
+    "primary sound capture driver",
+    "voicemeeter",
+    "vb-audio",
+  ];
+  const isVirtual = (label) => {
+    const l = (label || "").toLowerCase();
+    return VIRTUAL_PATTERNS.some((p) => l.includes(p));
+  };
+
+  const send = (result) => window.swiftType.micProbeResult(result);
+
+  try {
+    const settings = await window.swiftType.getSettings();
+    const saved = settings.microphone;
+    const userSelected = !!settings.micUserSelected;
+
+    let permStream = null;
+    try {
+      permStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      await send({
+        ok: false,
+        mic: null,
+        reason: "permission-denied",
+        detail: String(e && e.message ? e.message : e),
+      });
+      return;
+    }
+
+    const all = await navigator.mediaDevices.enumerateDevices();
+    permStream.getTracks().forEach((t) => t.stop());
+
+    const inputs = all.filter(
+      (d) => d.kind === "audioinput" && !isVirtual(d.label) && d.deviceId && d.deviceId !== "default"
+    );
+
+    const savedLabel = saved && saved.label ? saved.label : null;
+    const savedId = saved && saved.deviceId ? saved.deviceId : null;
+    const noSavedMic = !saved || !savedLabel || savedLabel === "System Default";
+
+    let chosen = null;
+    let path = "";
+
+    if (!noSavedMic) {
+      const byLabel = inputs.find((d) => d.label === savedLabel);
+      if (byLabel) {
+        chosen = byLabel;
+        path = "matched-by-label";
+      } else if (savedId) {
+        const byId = inputs.find((d) => d.deviceId === savedId);
+        if (byId) {
+          chosen = byId;
+          path = "matched-by-deviceId-fallback";
+        }
+      }
+    }
+
+    if (!chosen && noSavedMic && !userSelected) {
+      chosen = inputs[0] || null;
+      if (chosen) path = "auto-picked-first-launch";
+    }
+
+    if (!chosen && !noSavedMic) {
+      chosen = inputs[0] || null;
+      if (chosen) path = "auto-picked-fallback";
+    }
+
+    if (!chosen) {
+      await send({ ok: false, mic: null, reason: "no-input-devices" });
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { deviceId: { exact: chosen.deviceId } },
+      });
+      const tracks = stream.getAudioTracks();
+      stream.getTracks().forEach((t) => t.stop());
+      if (tracks.length === 0) {
+        await send({
+          ok: false,
+          mic: null,
+          reason: "no-audio-tracks",
+          attempted: { label: chosen.label, deviceId: chosen.deviceId },
+        });
+        return;
+      }
+    } catch (e) {
+      await send({
+        ok: false,
+        mic: null,
+        reason: "getUserMedia-failed",
+        detail: String(e && e.message ? e.message : e),
+        attempted: { label: chosen.label, deviceId: chosen.deviceId },
+      });
+      return;
+    }
+
+    await send({
+      ok: true,
+      mic: { label: chosen.label, deviceId: chosen.deviceId },
+      reason: path,
+    });
+  } catch (err) {
+    await send({
+      ok: false,
+      mic: null,
+      reason: "probe-error",
+      detail: String(err && err.message ? err.message : err),
+    });
+  }
+})();
+</script>
+</body>
+</html>

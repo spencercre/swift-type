@@ -16,16 +16,27 @@ const PYTHON = process.platform === "win32" ? "python" : "python3";
 
 // ─── State ───────────────────────────────────────────────────────────────────
 
-type TrayState = "idle" | "recording" | "transcribing";
+type TrayState = "idle" | "recording" | "transcribing" | "warning";
 
 let tray: Tray | null = null;
 let settingsWindow: BrowserWindow | null = null;
+let probeWindow: BrowserWindow | null = null;
 let recordingActive = false;
 let recordingStartEpoch = 0;
 
+// Settings window opens directly on the mic dropdown when this flag is set
+// (e.g. after a left-click on the warning tray icon).
+let settingsFocusMicOnce = false;
+
 // Persisted settings (written to disk on save)
+interface ResolvedMic {
+  label: string;
+  deviceId: string;
+}
+
 interface Settings {
-  microphone: string;
+  microphone: ResolvedMic | null;
+  micUserSelected: boolean;
   model: "tiny" | "base" | "small";
 }
 
@@ -35,12 +46,24 @@ function loadSettings(): Settings {
   try {
     if (fs.existsSync(SETTINGS_PATH)) {
       const raw = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf-8"));
-      return { microphone: raw.microphone ?? "default", model: raw.model ?? "base" };
+      let mic: ResolvedMic | null = null;
+      if (raw.microphone && typeof raw.microphone === "object") {
+        const lbl = typeof raw.microphone.label === "string" ? raw.microphone.label : "";
+        const id  = typeof raw.microphone.deviceId === "string" ? raw.microphone.deviceId : "";
+        if (lbl || id) mic = { label: lbl, deviceId: id };
+      }
+      // Legacy string microphone (e.g. "default" or device name) → treat as unresolved.
+      const model = (raw.model === "tiny" || raw.model === "small") ? raw.model : "base";
+      return {
+        microphone: mic,
+        micUserSelected: !!raw.micUserSelected,
+        model,
+      };
     }
   } catch {
     // fall through to defaults
   }
-  return { microphone: "default", model: "base" };
+  return { microphone: null, micUserSelected: false, model: "base" };
 }
 
 function saveSettings(s: Settings): void {
@@ -65,13 +88,21 @@ const ICON: Record<TrayState, () => Electron.NativeImage> = {
   idle:         () => assetIcon("icon-idle.png"),
   recording:    () => assetIcon("icon-recording.png"),
   transcribing: () => assetIcon("icon-transcribing.png"),
+  warning:      () => assetIcon("tray-warning.png"),
 };
 
+let trayState: TrayState = "idle";
+
 function setTrayState(state: TrayState): void {
+  trayState = state;
   if (!tray) return;
   tray.setImage(ICON[state]());
+  if (state === "warning") {
+    tray.setToolTip("Swift Type: No microphone selected — right-click to open Settings");
+    return;
+  }
   const modelLabel = settings.model.charAt(0).toUpperCase() + settings.model.slice(1);
-  const labels: Record<TrayState, string> = {
+  const labels: Record<Exclude<TrayState, "warning">, string> = {
     idle:         `Swift Type — ${modelLabel}`,
     recording:    "Swift Type — Recording…",
     transcribing: "Swift Type — Transcribing…",
@@ -87,18 +118,27 @@ function createTray(): void {
   const menu = Menu.buildFromTemplate([
     { label: "Swift Type", enabled: false },
     { type: "separator" },
-    { label: "Settings", click: openSettings },
+    { label: "Settings", click: () => openSettings() },
     { type: "separator" },
     { label: "Quit", click: () => app.quit() },
   ]);
   tray.setContextMenu(menu);
+
+  tray.on("click", () => {
+    openSettings({ focusMic: trayState === "warning" });
+  });
 }
 
 // ─── Settings window ─────────────────────────────────────────────────────────
 
-function openSettings(): void {
+function openSettings(opts: { focusMic?: boolean } = {}): void {
+  if (opts.focusMic) settingsFocusMicOnce = true;
+
   if (settingsWindow) {
     settingsWindow.focus();
+    if (opts.focusMic) {
+      settingsWindow.webContents.send("focus-mic-dropdown");
+    }
     return;
   }
 
@@ -114,6 +154,11 @@ function openSettings(): void {
     },
   });
 
+  // Allow mic permission prompts inside the settings window so device labels resolve.
+  settingsWindow.webContents.session.setPermissionRequestHandler(
+    (_wc, permission, callback) => callback(permission === "media")
+  );
+
   const settingsPath = app.isPackaged
     ? path.join(process.resourcesPath, "src", "settings.html")
     : path.join(__dirname, "../src/settings.html");
@@ -121,6 +166,82 @@ function openSettings(): void {
   settingsWindow.setIcon(assetIcon("icon-idle.png"));
   settingsWindow.on("closed", () => { settingsWindow = null; });
   settingsWindow.setMenu(null);
+}
+
+// ─── Mic probe (runs at startup in a hidden window) ──────────────────────────
+
+interface MicProbeResult {
+  ok: boolean;
+  mic: ResolvedMic | null;
+  reason: string;
+  detail?: string;
+  attempted?: { label: string; deviceId: string };
+}
+
+function startMicProbe(): void {
+  probeWindow = new BrowserWindow({
+    show: false,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      offscreen: false,
+    },
+  });
+
+  probeWindow.webContents.session.setPermissionRequestHandler(
+    (_wc, permission, callback) => callback(permission === "media")
+  );
+
+  const probePath = app.isPackaged
+    ? path.join(process.resourcesPath, "src", "mic-probe.html")
+    : path.join(__dirname, "../src/mic-probe.html");
+  probeWindow.loadFile(probePath);
+
+  probeWindow.on("closed", () => { probeWindow = null; });
+
+  // Fail-safe: if the probe never reports back (e.g. crashes), warn after 8s.
+  setTimeout(() => {
+    if (probeWindow && !probeWindow.isDestroyed()) {
+      console.warn("[SwiftType] mic probe timeout — entering warning state");
+      handleMicProbeResult({ ok: false, mic: null, reason: "probe-timeout" });
+      try { probeWindow.close(); } catch { /* ignore */ }
+    }
+  }, 8000);
+}
+
+function handleMicProbeResult(result: MicProbeResult): void {
+  if (result.ok && result.mic) {
+    const previous = settings.microphone;
+    settings.microphone = result.mic;
+    if (
+      !previous ||
+      previous.label !== result.mic.label ||
+      previous.deviceId !== result.mic.deviceId
+    ) {
+      saveSettings(settings);
+    }
+
+    if (result.reason === "auto-picked-first-launch") {
+      console.log(`[SwiftType] Auto-selected mic on first launch: ${result.mic.label}`);
+    } else if (result.reason === "matched-by-label") {
+      console.log(`[SwiftType] mic resolved by label: ${result.mic.label}`);
+    } else if (result.reason === "matched-by-deviceId-fallback") {
+      console.log(`[SwiftType] mic resolved by deviceId fallback (label missing): ${result.mic.label}`);
+    } else if (result.reason === "auto-picked-fallback") {
+      console.log(`[SwiftType] saved mic not found — auto-picked first available: ${result.mic.label}`);
+    } else {
+      console.log(`[SwiftType] mic resolved (${result.reason}): ${result.mic.label}`);
+    }
+    setTrayState("idle");
+  } else {
+    settings.microphone = null;
+    saveSettings(settings);
+    console.warn(
+      `[SwiftType] mic unresolved (${result.reason})${result.detail ? ": " + result.detail : ""}`
+    );
+    setTrayState("warning");
+  }
 }
 
 // ─── Whisper transcription subprocess ────────────────────────────────────────
@@ -217,8 +338,8 @@ async function startRecording(): Promise<void> {
     : path.join(__dirname, "../src/whisper_worker.py");
 
   const recArgs = [workerPath, "--record", audioTempPath];
-  if (settings.microphone && settings.microphone !== "default") {
-    recArgs.push("--device", settings.microphone);
+  if (settings.microphone && settings.microphone.label) {
+    recArgs.push("--device", settings.microphone.label);
   }
   console.log(`[SwiftType] recorder cmd: ${PYTHON} ${recArgs.join(" ")}`);
   const rec = spawn(PYTHON, recArgs, { detached: false });
@@ -270,7 +391,7 @@ async function stopRecording(): Promise<void> {
   console.log(`[SwiftType] WAV: path=${audioTempPath} exists=${wavExists} size=${wavSize}B`);
 
   if (!audioTempPath || !wavExists) {
-    setTrayState("idle");
+    setTrayState(settings.microphone ? "idle" : "warning");
     return;
   }
 
@@ -284,7 +405,7 @@ async function stopRecording(): Promise<void> {
   } finally {
     try { fs.unlinkSync(audioTempPath); } catch { /* ignore */ }
     audioTempPath = null;
-    setTrayState("idle");
+    setTrayState(settings.microphone ? "idle" : "warning");
   }
 }
 
@@ -337,10 +458,15 @@ function setupHook(): void {
 
 ipcMain.handle("get-settings", () => settings);
 
-ipcMain.handle("save-settings", (_event, newSettings: Settings) => {
-  settings = newSettings;
+ipcMain.handle("save-settings", (_event, newSettings: Partial<Settings>) => {
+  const merged: Settings = {
+    microphone: newSettings.microphone ?? null,
+    micUserSelected: newSettings.micUserSelected ?? settings.micUserSelected,
+    model: (newSettings.model as Settings["model"]) ?? settings.model,
+  };
+  settings = merged;
   saveSettings(settings);
-  setTrayState("idle");
+  setTrayState(settings.microphone ? "idle" : "warning");
 });
 
 ipcMain.handle("get-audio-devices", async () => {
@@ -358,6 +484,20 @@ ipcMain.handle("get-audio-devices", async () => {
     });
     proc.on("error", () => resolve([]));
   });
+});
+
+ipcMain.handle("mic-probe-result", (_event, result: MicProbeResult) => {
+  handleMicProbeResult(result);
+  if (probeWindow && !probeWindow.isDestroyed()) {
+    try { probeWindow.close(); } catch { /* ignore */ }
+  }
+  return true;
+});
+
+ipcMain.handle("settings-focus-mic-flag", () => {
+  const flag = settingsFocusMicOnce;
+  settingsFocusMicOnce = false;
+  return flag;
 });
 
 // ─── Model preflight ─────────────────────────────────────────────────────────
@@ -391,6 +531,7 @@ app.whenReady().then(() => {
   setTrayState("idle");
   setupHook();
   runPreflight();
+  startMicProbe();
 });
 
 app.on("will-quit", () => {

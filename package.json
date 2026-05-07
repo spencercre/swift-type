@@ -1,6 +1,6 @@
 {
   "name": "swift-type",
-  "version": "1.1.6",
+  "version": "1.1.7",
   "description": "Hold a key. Speak. Done. Hands-free voice input for Windows.",
   "main": "dist/main.js",
   "author": "Spencer",
@@ -46,6 +46,10 @@
       {
         "from": "src/settings.html",
         "to": "src/settings.html"
+      },
+      {
+        "from": "src/mic-probe.html",
+        "to": "src/mic-probe.html"
       }
     ],
     "win": {

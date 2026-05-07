@@ -135,43 +135,107 @@
     const statusEl = document.getElementById("status");
     const saveBtn  = document.getElementById("saveBtn");
 
-    // ── Init ───────────────────────────────────────────────────────────────────
+    const VIRTUAL_PATTERNS = [
+      "stereo mix",
+      "what u hear",
+      "microsoft sound mapper",
+      "primary sound capture driver",
+      "voicemeeter",
+      "vb-audio",
+    ];
+    const isVirtual = (label) => {
+      const l = (label || "").toLowerCase();
+      return VIRTUAL_PATTERNS.some((p) => l.includes(p));
+    };
 
-    async function init() {
-      const [settings, devices] = await Promise.all([
-        api.getSettings(),
-        api.getAudioDevices(),
-      ]);
-
-      // Mic dropdown — "System Default" always first, real devices appended
-      if (Array.isArray(devices) && devices.length > 0) {
-        devices.forEach(d => {
-          const opt = document.createElement("option");
-          const name = d.name ?? d;
-          opt.value = name;
-          opt.textContent = d.label ?? name;
-          if (settings.microphone === name) opt.selected = true;
-          micEl.appendChild(opt);
-        });
+    async function listInputDevices() {
+      let permStream = null;
+      try {
+        permStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (e) {
+        // Without permission, labels will be empty — still fall through.
+        console.warn("[SwiftType] settings: mic permission denied:", e && e.message);
       }
-
-      modelEl.value = settings.model ?? "base";
+      const all = await navigator.mediaDevices.enumerateDevices();
+      if (permStream) permStream.getTracks().forEach((t) => t.stop());
+      return all.filter(
+        (d) =>
+          d.kind === "audioinput" &&
+          !isVirtual(d.label) &&
+          d.deviceId &&
+          d.deviceId !== "default"
+      );
     }
 
-    // ── Save ───────────────────────────────────────────────────────────────────
+    function clearMicOptions() {
+      while (micEl.options.length > 1) micEl.remove(1);
+    }
+
+    async function init() {
+      const settings = await api.getSettings();
+      const focusMic = await api.shouldFocusMic();
+
+      const inputs = await listInputDevices();
+      clearMicOptions();
+      inputs.forEach((d) => {
+        const opt = document.createElement("option");
+        opt.value = d.deviceId;
+        opt.textContent = d.label || `(unnamed device ${d.deviceId.slice(0, 6)})`;
+        opt.dataset.label = d.label || "";
+        opt.dataset.deviceId = d.deviceId;
+        micEl.appendChild(opt);
+      });
+
+      const saved = settings.microphone;
+      let selected = false;
+      if (saved && saved.label) {
+        const byLabel = inputs.find((d) => d.label === saved.label);
+        if (byLabel) {
+          micEl.value = byLabel.deviceId;
+          selected = true;
+        } else if (saved.deviceId) {
+          const byId = inputs.find((d) => d.deviceId === saved.deviceId);
+          if (byId) {
+            micEl.value = byId.deviceId;
+            selected = true;
+          }
+        }
+      }
+      if (!selected) micEl.value = "default";
+
+      modelEl.value = settings.model ?? "base";
+
+      if (focusMic) {
+        micEl.focus();
+        try { micEl.showPicker && micEl.showPicker(); } catch {}
+      }
+    }
 
     saveBtn.addEventListener("click", async () => {
       saveBtn.disabled = true;
+      let microphone = null;
+      if (micEl.value && micEl.value !== "default") {
+        const opt = micEl.options[micEl.selectedIndex];
+        microphone = {
+          label: opt.dataset.label || opt.textContent || "",
+          deviceId: opt.dataset.deviceId || opt.value,
+        };
+      }
       await api.saveSettings({
-        microphone: micEl.value,
-        model:      modelEl.value,
+        microphone,
+        micUserSelected: true,
+        model: modelEl.value,
       });
       statusEl.textContent = "Saved.";
       setTimeout(() => { statusEl.textContent = ""; }, 2000);
       saveBtn.disabled = false;
     });
 
-    init();
+    init().catch((e) => {
+      console.error("[SwiftType] settings init failed:", e);
+      statusEl.style.color = "#f87171";
+      statusEl.textContent = "Failed to load settings.";
+    });
   </script>
 </body>
 </html>
